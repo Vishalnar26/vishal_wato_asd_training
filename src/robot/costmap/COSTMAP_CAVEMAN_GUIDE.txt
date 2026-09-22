@@ -1,0 +1,302 @@
+CAVEMAN GUIDE TO BUILD COSTMAP
+==============================
+(read like caveman explain to caveman friend who never see C++ before)
+
+CAVEMAN GOAL: robot eye (lidar) see rock. caveman brain (costmap_node) make map
+of rock. map go out to other caveman (planner) so nobody walk into rock.
+
+
+STEP -1 - C++ WORDS CAVEMAN MUST KNOW FIRST (skip if already know)
+---------------------------------------------------------------------
+before touch code, caveman learn what squiggle marks MEAN. C++ full of
+weird symbol, here caveman-translate:
+
+  #include "thing.hpp"   -> "bring thing scroll into this cave, so caveman
+                             can use tool/word written in it"
+
+  class CostmapNode { }; -> "blueprint for one caveman-robot-brain. inside
+                             blueprint: tools (functions) and belongings
+                             (variables) that brain carry around"
+
+  public: / private:     -> public = other caveman allowed touch/call it.
+                             private = only THIS brain allowed touch it,
+                             outsider hands off.
+
+  CostmapNode::CostmapNode() -> "constructor". special function, run ONE
+                             time, moment brain born (object created). this
+                             where caveman set up ears/mouths.
+
+  this->                 -> "my own". this->create_subscription(...) mean
+                             "I, this exact brain, make new ear".
+
+  ::                     -> like slash in address. sensor_msgs::msg::LaserScan
+                             mean "go into sensor_msgs cave, then msg room,
+                             find LaserScan scroll". just a path, not math.
+
+  .  vs  ->               -> both mean "reach inside and grab belonging".
+                             use . when holding THING itself
+                             (grid_msg.header ...)
+                             use -> when holding POINTER / SharedPtr (arrow,
+                             not the arrow's owner) (scan->ranges ...)
+
+  SharedPtr               -> think of it like a "claim ticket" pointing at
+                             a thing living elsewhere in cave storage,
+                             instead of caveman carrying the whole heavy
+                             thing himself. ROS give caveman SharedPtr to
+                             message instead of giant copy.
+
+  <TYPE>  (angle brackets) -> "fill in the blank with whatever type caveman
+                             say". rclcpp::Subscription<sensor_msgs::msg::
+                             LaserScan> mean "ear, but specifically an ear
+                             built only for LaserScan scrolls, no other."
+
+  const X&  or  const X::SharedPtr  -> "caveman promise: I only LOOK at
+                             this, I no break/change it."
+
+  std::bind(&Class::func, this, std::placeholders::_1)
+                          -> "make a note that says: later, when message
+                             show up, go call func() that belongs to THIS
+                             brain, and shove the message into func's first
+                             empty slot (_1)". caveman does not call func
+                             himself here, ROS call it automatically later.
+
+  void funcName(ArgType arg) -> function declaration. "void" mean function
+                             give nothing back when done. ArgType arg mean
+                             function expect one delivery of type ArgType,
+                             caveman calls it "arg" inside.
+
+that all caveman NEED for now. rest make sense once seen in real code below.
+
+
+STEP 0 - CAVEMAN LOOK AT WHAT ALREADY THERE (which file to open?)
+--------------------------------------------------------------------
+caveman NO make new file. no new file, no new cave. both files caveman need
+ALREADY EXIST, just open them and edit:
+
+   costmap_node.hpp   -> the "table of contents" file (belongings + names
+                          of functions). caveman open THIS first for Step 1.
+   costmap_node.cpp   -> the "real work" file (function bodies actually run).
+                          caveman open THIS for Step 2, 3, 4.
+
+both sit right next to this guide, same folder:
+   .../src/robot/costmap/include/costmap_node.hpp
+   .../src/robot/costmap/src/costmap_node.cpp
+
+caveman file costmap_node.cpp already know how make ONE thing: publisher.
+it make "/test_topic" and shout "Hello ROS 2" every half second with timer.
+caveman must learn SUBSCRIBE now. subscribe = caveman LISTEN, not shout.
+
+
+STEP 1 - CAVEMAN ADD EAR (SUBSCRIBER) IN HEADER FILE
+-----------------------------------------------------
+open costmap_node.hpp. this file = "table of contents" for brain, it just
+LISTS what brain has, real work write somewhere else (.cpp file).
+
+1. bring in right scroll (include) for message type caveman want listen to.
+   put these near top, with the other #include line already there:
+   #include "sensor_msgs/msg/laser_scan.hpp"
+   #include "nav_msgs/msg/occupancy_grid.hpp"
+
+2. inside "private:" part of class, add ear (subscriber), mouth (publisher),
+   and caveman's own grid storage + settings as belongings:
+   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr lidar_sub_;
+   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_pub_;
+
+   std::vector<int8_t> grid_;   // the map itself, ONE long list of numbers
+   int width_ = 300;            // how many boxes across
+   int height_ = 300;           // how many boxes tall
+   double resolution_ = 0.1;    // meters per box
+   double origin_x_ = -15.0;    // real-world x where box (0,0) sits
+   double origin_y_ = -15.0;    // real-world y where box (0,0) sits
+   double inflation_radius_ = 1.0;  // meters, how far danger spread from rock
+   int max_cost_ = 100;             // biggest danger number allowed
+
+   caveman-note on std::vector: think of it like a magic bag that can hold
+   many numbers in a row and grow/shrink itself. grid_[5] grab item number 5
+   from bag (counting start at 0, not 1).
+
+3. inside "public:" part (or private, either fine, just be consistent),
+   add function that run WHEN ear hear something. this called "callback".
+   only need to WRITE THE NAME here, body come later in .cpp file:
+   void laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan);
+
+   caveman-note: "laserCallback" NOT a magic reserved word, just a name
+   THIS guide picked. caveman free to call it anything (onLidarScan,
+   handleScan, whatever). only rule: same exact name must be used in ALL
+   THREE spots - .hpp declaration, .cpp definition, and std::bind call in
+   Step 2 - else compiler caveman get confused and yell at build time.
+
+CAVEMAN RULE: subscriber need callback. callback = "what caveman do when
+message arrive". no callback, no reaction, message ignored, rock still there,
+robot bonk into rock. bad.
+
+
+STEP 2 - CAVEMAN BUILD EAR IN CONSTRUCTOR (.cpp file)
+--------------------------------------------------------
+in costmap_node.cpp, inside CostmapNode::CostmapNode(), caveman WRITE:
+
+   grid_.resize(width_ * height_, 0);   // fill map bag with width*height
+                                         // zeros, so all boxes start "free"
+
+   lidar_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
+     "/lidar", 10,
+     std::bind(&CostmapNode::laserCallback, this, std::placeholders::_1));
+
+caveman translate this line piece by piece:
+
+   create_subscription<TYPE>(...)   -> "make new ear that only understand
+                                        message of TYPE"
+   "/lidar"                          -> "topic name, ear point at this hole"
+   10                                -> "queue size, how many message ear
+                                        remember if busy"
+   std::bind(&CostmapNode::laserCallback, this, ...) -> "when message come,
+                                        run MY laserCallback function, on
+                                        MYSELF (this), and give it message
+                                        as argument"
+
+also make publisher for costmap output, same pattern as string_pub_ already
+there, but new type:
+
+   costmap_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+     "/costmap", 10);
+
+caveman may throw away old string_pub_ / timer_ / publishMessage(), those
+just tutorial training wheels.
+
+
+STEP 3 - CAVEMAN WRITE THE CALLBACK BODY
+-------------------------------------------
+this where real brain work happen, write this WHOLE function in the .cpp
+file (this function body did NOT go in the .hpp file, only its name did).
+function signature (first line, no semicolon at end because body follow):
+
+   void CostmapNode::laserCallback(const sensor_msgs::msg::LaserScan::SharedPtr scan) {
+     ... body goes here ...
+   }
+
+caveman-note: "CostmapNode::" in front of name mean "this laserCallback
+ belong to CostmapNode blueprint", must match hpp declaration exactly.
+
+caveman get "scan" bag full of numbers (use -> because scan is SharedPtr):
+   scan->angle_min        - first arrow angle
+   scan->angle_increment  - how much angle turn per arrow
+   scan->ranges[i]        - how far arrow i fly before hit rock (meter)
+   scan->ranges.size()    - HOW MANY arrows total in this scan
+
+first, reset grid so old rocks wiped clean each time new scan arrive:
+   std::fill(grid_.begin(), grid_.end(), 0);
+
+now the real C++ loop, this the actual syntax caveman TYPE (not pseudocode):
+
+   for (size_t i = 0; i < scan->ranges.size(); i++) {
+     double range = scan->ranges[i];
+
+     if (!std::isfinite(range) || range < scan->range_min || range > scan->range_max) {
+       continue;   // "continue" = skip rest of this loop turn, go next i
+     }
+
+     double angle = scan->angle_min + i * scan->angle_increment;
+     double x = range * std::cos(angle);
+     double y = range * std::sin(angle);
+
+     int grid_x = static_cast<int>((x - origin_x_) / resolution_);
+     int grid_y = static_cast<int>((y - origin_y_) / resolution_);
+
+     if (grid_x < 0 || grid_x >= width_ || grid_y < 0 || grid_y >= height_) {
+       continue;   // point fell outside the map box, ignore it
+     }
+
+     grid_[grid_y * width_ + grid_x] = 100;   // 100 = "ROCK HERE, DANGER"
+   }
+
+caveman-translate the new pieces:
+   size_t             -> a counting-number type made for counting/sizes,
+                         always zero or positive, use it for loop counters
+                         over vectors.
+   for (start; stop_condition; step) { ... } -> "start i at 0, keep looping
+                         WHILE condition true, add 1 to i after each lap"
+   std::isfinite(x)   -> true if x is a normal real number, false if
+                         infinity or NaN (garbage reading).
+   static_cast<int>(x) -> "chop the decimal part off x and hand me back a
+                         whole number". needed because grid boxes counted
+                         in whole numbers, not 3.7 of a box.
+   grid_[index]       -> grab/set the item at that index in the vector.
+
+after marking rocks, caveman do INFLATE (make danger zone bigger around
+rock, so caveman-robot no walk right next to rock edge). still inside
+laserCallback, after the loop above:
+
+   for (int gy = 0; gy < height_; gy++) {
+     for (int gx = 0; gx < width_; gx++) {
+       if (grid_[gy * width_ + gx] != 100) continue;  // only spread from rocks
+
+       int cell_radius = static_cast<int>(inflation_radius_ / resolution_);
+       for (int dy = -cell_radius; dy <= cell_radius; dy++) {
+         for (int dx = -cell_radius; dx <= cell_radius; dx++) {
+           int nx = gx + dx;
+           int ny = gy + dy;
+           if (nx < 0 || nx >= width_ || ny < 0 || ny >= height_) continue;
+
+           double d = std::sqrt(dx * dx + dy * dy) * resolution_;
+           if (d > inflation_radius_) continue;   // too far, no danger
+
+           int8_t cost = static_cast<int8_t>(max_cost_ * (1 - d / inflation_radius_));
+           int idx = ny * width_ + nx;
+           if (cost > grid_[idx]) {
+             grid_[idx] = cost;   // only grow danger, never shrink it
+           }
+         }
+       }
+     }
+   }
+
+caveman-note: "nested for loop" = loop inside a loop, like checking every
+box (gy, gx) on map, then for EACH rock box, checking every nearby box
+(dy, dx) around it. four loops deep look scary but each one just "try
+every number in a range", same shape every time.
+
+
+STEP 4 - CAVEMAN SHOUT MAP TO OTHERS (PUBLISH)
+--------------------------------------------------
+still inside laserCallback, after inflate loop, real C++ (note the . not ->,
+because grid_msg is a real object caveman made right here, not a pointer):
+
+   nav_msgs::msg::OccupancyGrid grid_msg;
+   grid_msg.header.stamp = this->now();
+   grid_msg.header.frame_id = "map";      // or whatever frame caveman use
+   grid_msg.info.resolution = resolution_;
+   grid_msg.info.width = width_;
+   grid_msg.info.height = height_;
+   grid_msg.info.origin.position.x = origin_x_;
+   grid_msg.info.origin.position.y = origin_y_;
+
+   grid_msg.data = grid_;   // grid_ already stored flat, just copy it over
+
+   costmap_pub_->publish(grid_msg);
+
+caveman-note: since grid_ already built as one long std::vector (not a 2D
+box), no extra flatten loop needed here, just hand it straight to data.
+BUT caveman must remember the formula used earlier to WRITE into grid_:
+  index = row * width_ + col
+this is the flatten trick, very important, use same formula every time
+turn 2D thinking (row, col) into 1D storage (index).
+
+
+STEP 5 - CAVEMAN CHECK PACKAGE FILE KNOW ABOUT NEW FRIEND SCROLLS
+---------------------------------------------------------------------
+package.xml and CMakeLists.txt must list sensor_msgs and nav_msgs as
+dependency, else compiler caveman get angry and no build fire.
+
+
+QUICK CAVEMAN CHEAT SHEET - SUBSCRIBE PATTERN (memorize this shape)
+----------------------------------------------------------------------
+1. include message header       #include "pkg/msg/thing.hpp"
+2. declare subscriber member    rclcpp::Subscription<pkg::msg::Thing>::SharedPtr sub_;
+3. declare callback function    void onThing(const pkg::msg::Thing::SharedPtr msg);
+4. create subscriber in ctor    sub_ = create_subscription<pkg::msg::Thing>(
+                                     "/topic_name", queue_size,
+                                     std::bind(&Class::onThing, this, std::placeholders::_1));
+5. write callback body          use msg->field to read data, do work
+
+every subscriber in ROS ever built = same 5 shape. caveman learn shape once,
+caveman subscribe to ANY topic forever. good caveman.
