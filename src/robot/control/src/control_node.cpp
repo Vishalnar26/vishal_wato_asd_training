@@ -1,5 +1,9 @@
 #include "control_node.hpp"
 
+#include <cmath>
+#include "tf2/LinearMath/Matrix3x3.h"
+#include "tf2/LinearMath/Quaternion.h"
+
 ControlNode::ControlNode(): Node("control"), control_(robot::ControlCore(this->get_logger())) {
   path_sub_ = this->create_subscription<nav_msgs::msg::Path>("/path", 10, std::bind(&ControlNode::pathCallback, this, std::placeholders::_1));
 
@@ -21,56 +25,70 @@ void ControlNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
 }
 
 void ControlNode::controlLoop() {
-  IF (!current_path_ || !robot_odom_) {
-    RETURN;
+  if (!current_path_ || !robot_odom_) {
+    return;
   }
 
   auto lookahead_point = findLookaheadPoint();
-  IF (!lookahead_point) {
-    RETURN;
+  if (!lookahead_point) {
+    return;
   }
 
   auto cmd_vel = computeVelocity(*lookahead_point);
   cmd_vel_pub_->publish(cmd_vel);
+}
+
+std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint() {
+  if (current_path_->poses.empty()) {
+    return std::nullopt;
   }
 
-  std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint() {
-    // WALK THROUGH current_path_->poses ONE BY ONE.
-    // FOR EACH POINT, computeDistance() FROM ROBOT CURRENT POSITION
-    //   (robot_odom_->pose.pose.position) TO THAT PATH POINT.
-    // FIRST POINT WHOSE DISTANCE >= lookahead_distance_ = YOUR PICK.
-    // IF NO POINT FAR ENOUGH (WE NEAR END OF PATH), RETURN LAST POINT
-    //   OR std::nullopt IF PATH TRULY EMPTY.
+  const auto &robot_position = robot_odom_->pose.pose.position;
+  for (const auto &pose : current_path_->poses) {
+    if (computeDistance(robot_position, pose.pose.position) >= lookahead_distance_) {
+      return pose;
+    }
   }
 
-  geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg::PoseStamped &target) {
-    // 1. GET ROBOT YAW: extractYaw(robot_odom_->pose.pose.orientation)
-    // 2. FIND ANGLE FROM ROBOT TO target (atan2(dy, dx))
-    // 3. STEERING ANGLE = ANGLE FROM ROBOT TO TARGET MINUS ROBOT YAW
-    //    (NORMALIZE TO -PI..PI SO ROBOT NOT SPIN WRONG WAY)
-    // 4. CURVATURE = 2 * sin(STEERING ANGLE) / lookahead_distance_
-    // 5. geometry_msgs::msg::Twist cmd_vel;
-    //    cmd_vel.linear.x = linear_speed_;
-    //    cmd_vel.angular.z = CURVATURE * linear_speed_;
-    // 6. IF DISTANCE TO current_path_->poses.back() < goal_tolerance_,
-    //    SET BOTH linear.x AND angular.z TO 0 (WE HOME, STOP CAVE-BOT).
-    // RETURN cmd_vel;
+  return current_path_->poses.back();
+}
+
+geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg::PoseStamped &target) {
+  double robot_yaw = extractYaw(robot_odom_->pose.pose.orientation);
+  const auto &robot_position = robot_odom_->pose.pose.position;
+
+  double dx = target.pose.position.x - robot_position.x;
+  double dy = target.pose.position.y - robot_position.y;
+  double angle_to_target = std::atan2(dy, dx);
+
+  double steering_angle = angle_to_target - robot_yaw;
+  steering_angle = std::atan2(std::sin(steering_angle), std::cos(steering_angle));
+
+  double curvature = 2 * std::sin(steering_angle) / lookahead_distance_;
+
+  geometry_msgs::msg::Twist cmd_vel;
+  cmd_vel.linear.x = linear_speed_;
+  cmd_vel.angular.z = curvature * linear_speed_;
+
+  if (computeDistance(robot_position, current_path_->poses.back().pose.position) < goal_tolerance_) {
+    cmd_vel.linear.x = 0.0;
+    cmd_vel.angular.z = 0.0;
   }
 
-  double ControlNode::computeDistance(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b) {
-    RETURN std::hypot(b.x - a.x, b.y - a.y);   <- PYTHAGORAS. CAVEMAN LOVE TRIANGLE.
-  }
+  return cmd_vel;
+}
 
-  double ControlNode::extractYaw(const geometry_msgs::msg::Quaternion &quat) {
-    // QUATERNION WEIRD 4-NUMBER ROTATION THING. USE tf2 HELPER:
-    //   tf2::Quaternion q(quat.x, quat.y, quat.z, quat.w);
-    //   tf2::Matrix3x3 m(q);
-    //   double roll, pitch, yaw;
-    //   m.getRPY(roll, pitch, yaw);
-    //   RETURN yaw;
-    // NEED #include "tf2/LinearMath/Matrix3x3.h" AND
-    //      #include "tf2/LinearMath/Quaternion.h" FOR THIS.
-  }
+double ControlNode::computeDistance(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b) {
+  return std::hypot(b.x - a.x, b.y - a.y);
+}
+
+double ControlNode::extractYaw(const geometry_msgs::msg::Quaternion &quat) {
+  tf2::Quaternion q(quat.x, quat.y, quat.z, quat.w);
+  tf2::Matrix3x3 m(q);
+  double roll, pitch, yaw;
+  m.getRPY(roll, pitch, yaw);
+  return yaw;
+}
 
 int main(int argc, char ** argv)
 {
