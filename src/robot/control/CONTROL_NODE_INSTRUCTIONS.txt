@@ -117,10 +117,10 @@ NOW WRITE THE FUNCTION BODIES (BELOW CONSTRUCTOR):
   }
 
   void ControlNode::controlLoop() {
-    IF (!current_path_ || !robot_odom_) RETURN;   <- NO DATA YET? DO NOTHING, DON'T CRASH CAVE.
+    if (!current_path_ || !robot_odom_) return;   // NO DATA YET? DO NOTHING, DON'T CRASH CAVE.
 
     auto lookahead_point = findLookaheadPoint();
-    IF (!lookahead_point) RETURN;    <- MAYBE PATH EMPTY OR WE AT END. STOP QUIET.
+    if (!lookahead_point) return;    // MAYBE PATH EMPTY OR WE AT END. STOP QUIET.
 
     auto cmd_vel = computeVelocity(*lookahead_point);
     cmd_vel_pub_->publish(cmd_vel);
@@ -150,7 +150,7 @@ NOW WRITE THE FUNCTION BODIES (BELOW CONSTRUCTOR):
   }
 
   double ControlNode::computeDistance(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b) {
-    RETURN std::hypot(b.x - a.x, b.y - a.y);   <- PYTHAGORAS. CAVEMAN LOVE TRIANGLE.
+    return std::hypot(b.x - a.x, b.y - a.y);   // PYTHAGORAS. CAVEMAN LOVE TRIANGLE.
   }
 
   double ControlNode::extractYaw(const geometry_msgs::msg::Quaternion &quat) {
