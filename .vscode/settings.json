@@ -10,4 +10,5 @@
         "editor.defaultFormatter": "charliermarsh.ruff"
     },
     "python.analysis.autoSearchPaths": true,
+    "cmake.sourceDirectory": "/Users/ashleyzhong/waton-group/vishal_wato_asd_training-1/src/gazebo",
 }
