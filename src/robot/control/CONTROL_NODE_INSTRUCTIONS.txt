@@ -1,0 +1,253 @@
+=====================================================
+CONTROL NODE INSTRUCTIONS - CAVEMAN SPEAK EDITION
+=====================================================
+UGH. CONTROL NODE. LAST NODE. THIS NODE MAKE ROBOT MOVE.
+ROBOT GET PATH FROM PLANNER. ROBOT GET POSITION FROM ODOM.
+CONTROL NODE LOOK AT BOTH. CONTROL NODE SHOUT "GO THIS FAST,
+TURN THIS MUCH" TO WHEELS. THIS CALLED /cmd_vel. WITHOUT THIS
+NODE, ROBOT JUST SIT THERE LIKE ROCK. NOT GOOD. ROCK NOT WIN RACE.
+
+OTHER CAVEMAN WORKING ON planner AND map_memory. YOU NOT TOUCH
+THOSE CAVES. YOU JUST TRUST /path AND /odom/filtered SHOW UP
+CORRECT, LIKE MAGIC FROM OTHER TRIBE. THIS FILE ONLY TALK
+ABOUT control PACKAGE. EVEN IF planner/map_memory STILL SKELETON
+RIGHT NOW, WRITE control CODE LIKE THEY ALREADY WORK.
+
+WE USE "PURE PURSUIT" CAVEMAN STRATEGY. NOT PID. PID FOR
+SMART CAVEMAN LATER. PURE PURSUIT SIMPLE:
+  1. LOOK AT PATH.
+  2. FIND POINT ON PATH LIL BIT AHEAD OF ROBOT (LOOKAHEAD POINT).
+  3. POINT ROBOT NOSE AT THAT POINT.
+  4. WALK FORWARD, TURN TOWARD POINT.
+  5. REPEAT FOREVER. POINT MOVE, ROBOT FOLLOW, LIKE CAVEMAN
+     CHASING MAMMOTH THAT KEEP WALKING AWAY.
+
+-----------------------------------------------------
+FILES YOU TOUCH (SAME CAVE AS COSTMAP, DIFFERENT ROOM)
+-----------------------------------------------------
+robot/control/include/control_node.hpp   <- ROBOT EARS AND MOUTH (subs/pub/timer)
+robot/control/src/control_node.cpp       <- ROBOT BRAIN LOGIC LIVE HERE
+robot/control/include/control_core.hpp   <- LEAVE MOSTLY ALONE. JUST LOGGER LIVE HERE.
+robot/control/src/control_core.cpp       <- LEAVE MOSTLY ALONE TOO.
+robot/control/CMakeLists.txt             <- TELL BUILD CAVE-TOOL ABOUT NEW MSG TYPES
+robot/control/package.xml                <- TELL ROS ABOUT NEW MSG TYPES TOO
+
+CAVEMAN NOTE: LOOK AT costmap/include/costmap_node.hpp AND
+costmap/src/costmap_node.cpp IF CONFUSED. control NODE BUILT
+SAME WAY. NODE FILE HOLD ROS PLUMBING + LOGIC. CORE FILE STAY
+SKINNY, JUST HOLD LOGGER. SAME PATTERN, DIFFERENT MEAT.
+
+=====================================================
+STEP 1 - OPEN control_node.hpp
+=====================================================
+THIS FILE where you tell ROS "I WANT THESE MAILBOXES."
+
+ADD THESE INCLUDES NEAR TOP (UNDER rclcpp INCLUDE):
+  #include "nav_msgs/msg/path.hpp"
+  #include "nav_msgs/msg/odometry.hpp"
+  #include "geometry_msgs/msg/twist.hpp"
+  #include <optional>
+
+INSIDE "public:" SECTION, KEEP ControlNode() CONSTRUCTOR. NO
+NEED TO MAKE CALLBACKS PUBLIC (costmap_node.hpp DO THIS BY
+ACCIDENT-ISH). PUT CALLBACKS IN "private:" INSTEAD - MORE
+CAVEMAN-CORRECT.
+
+INSIDE "private:" SECTION ADD:
+  - CALLBACK FUNCTION DECLARATIONS (FUNCTIONS RAN WHEN NEW
+    MESSAGE ARRIVE OR WHEN TIMER TICK):
+      void pathCallback(const nav_msgs::msg::Path::SharedPtr msg);
+      void odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg);
+      void controlLoop();  <- TIMER CALL THIS ONE OVER AND OVER
+
+  - MEMBER VARIABLES (ROBOT TOOLS, STORED SO EVERY FUNCTION
+    CAN GRAB THEM):
+      rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+      rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+      rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+      rclcpp::TimerBase::SharedPtr control_timer_;
+
+      nav_msgs::msg::Path::SharedPtr current_path_;      <- LATEST PATH SAVED HERE
+      nav_msgs::msg::Odometry::SharedPtr robot_odom_;     <- LATEST POSITION SAVED HERE
+
+  - HELPER FUNCTION DECLARATIONS (MATH BRAIN, NOT ROS STUFF):
+      std::optional<geometry_msgs::msg::PoseStamped> findLookaheadPoint();
+      geometry_msgs::msg::Twist computeVelocity(const geometry_msgs::msg::PoseStamped &target);
+      double computeDistance(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b);
+      double extractYaw(const geometry_msgs::msg::Quaternion &quat);
+
+  - TUNING NUMBERS (KNOBS YOU TWEAK LATER):
+      double lookahead_distance_ = 1.0;   <- HOW FAR AHEAD ROBOT LOOK
+      double goal_tolerance_ = 0.1;       <- HOW CLOSE = "WE THERE"
+      double linear_speed_ = 0.5;         <- HOW FAST ROBOT WALK FORWARD
+
+=====================================================
+STEP 2 - OPEN control_node.cpp
+=====================================================
+THIS WHERE PLUMBING GET WIRED UP + WHERE BRAIN ACTUALLY THINK.
+
+IN CONSTRUCTOR ControlNode(), AFTER "control_(robot::ControlCore(...))"
+PART, ADD BODY WITH { } AND WIRE UP:
+
+  path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
+      "/path", 10, std::bind(&ControlNode::pathCallback, this, std::placeholders::_1));
+
+  odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+      "/odom/filtered", 10, std::bind(&ControlNode::odomCallback, this, std::placeholders::_1));
+
+  cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+
+  control_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(100),   <- 100ms = 10Hz, PROBLEM SAY 10Hz GOOD
+      std::bind(&ControlNode::controlLoop, this));
+
+CAVEMAN WARNING: SUBSCRIBE = "TELL ME WHEN NEW THING ARRIVE."
+PUBLISH = "SHOUT THING TO WHOLE CAVE." TIMER = "TAP ME ON
+SHOULDER EVERY X TIME, NO MATTER WHAT." control_timer_ IS HEART
+BEAT OF NODE - WITHOUT IT, controlLoop() NEVER RUN.
+
+NOW WRITE THE FUNCTION BODIES (BELOW CONSTRUCTOR):
+
+  void ControlNode::pathCallback(const nav_msgs::msg::Path::SharedPtr msg) {
+    current_path_ = msg;   <- JUST SAVE IT. DON'T PANIC-COMPUTE HERE.
+  }
+
+  void ControlNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+    robot_odom_ = msg;     <- SAME. SAVE FOR LATER.
+  }
+
+  void ControlNode::controlLoop() {
+    IF (!current_path_ || !robot_odom_) RETURN;   <- NO DATA YET? DO NOTHING, DON'T CRASH CAVE.
+
+    auto lookahead_point = findLookaheadPoint();
+    IF (!lookahead_point) RETURN;    <- MAYBE PATH EMPTY OR WE AT END. STOP QUIET.
+
+    auto cmd_vel = computeVelocity(*lookahead_point);
+    cmd_vel_pub_->publish(cmd_vel);
+  }
+
+  std::optional<geometry_msgs::msg::PoseStamped> ControlNode::findLookaheadPoint() {
+    // WALK THROUGH current_path_->poses ONE BY ONE.
+    // FOR EACH POINT, computeDistance() FROM ROBOT CURRENT POSITION
+    //   (robot_odom_->pose.pose.position) TO THAT PATH POINT.
+    // FIRST POINT WHOSE DISTANCE >= lookahead_distance_ = YOUR PICK.
+    // IF NO POINT FAR ENOUGH (WE NEAR END OF PATH), RETURN LAST POINT
+    //   OR std::nullopt IF PATH TRULY EMPTY.
+  }
+
+  geometry_msgs::msg::Twist ControlNode::computeVelocity(const geometry_msgs::msg::PoseStamped &target) {
+    // 1. GET ROBOT YAW: extractYaw(robot_odom_->pose.pose.orientation)
+    // 2. FIND ANGLE FROM ROBOT TO target (atan2(dy, dx))
+    // 3. STEERING ANGLE = ANGLE FROM ROBOT TO TARGET MINUS ROBOT YAW
+    //    (NORMALIZE TO -PI..PI SO ROBOT NOT SPIN WRONG WAY)
+    // 4. CURVATURE = 2 * sin(STEERING ANGLE) / lookahead_distance_
+    // 5. geometry_msgs::msg::Twist cmd_vel;
+    //    cmd_vel.linear.x = linear_speed_;
+    //    cmd_vel.angular.z = CURVATURE * linear_speed_;
+    // 6. IF DISTANCE TO current_path_->poses.back() < goal_tolerance_,
+    //    SET BOTH linear.x AND angular.z TO 0 (WE HOME, STOP CAVE-BOT).
+    // RETURN cmd_vel;
+  }
+
+  double ControlNode::computeDistance(const geometry_msgs::msg::Point &a, const geometry_msgs::msg::Point &b) {
+    RETURN std::hypot(b.x - a.x, b.y - a.y);   <- PYTHAGORAS. CAVEMAN LOVE TRIANGLE.
+  }
+
+  double ControlNode::extractYaw(const geometry_msgs::msg::Quaternion &quat) {
+    // QUATERNION WEIRD 4-NUMBER ROTATION THING. USE tf2 HELPER:
+    //   tf2::Quaternion q(quat.x, quat.y, quat.z, quat.w);
+    //   tf2::Matrix3x3 m(q);
+    //   double roll, pitch, yaw;
+    //   m.getRPY(roll, pitch, yaw);
+    //   RETURN yaw;
+    // NEED #include "tf2/LinearMath/Matrix3x3.h" AND
+    //      #include "tf2/LinearMath/Quaternion.h" FOR THIS.
+  }
+
+CAVEMAN NOTE: PSEUDOCODE FROM ASSIGNMENT GIVE ONE-CLASS VERSION.
+THIS CAVE SPLIT ControlNode (ROS PLUMBING) FROM ControlCore
+(SKINNY LOGGER HOLDER), SAME AS costmap_node.cpp DOES. PUT ALL
+LOGIC ABOVE DIRECTLY IN ControlNode LIKE COSTMAP DID WITH
+laserCallback. DON'T OVERTHINK CORE FILE.
+
+=====================================================
+STEP 3 - control_core.hpp / control_core.cpp
+=====================================================
+MOSTLY LEAVE ALONE. THIS JUST HOLD LOGGER, SAME AS COSTMAP.
+IF YOU WANT BE FANCY CAVEMAN, YOU CAN MOVE MATH HELPERS
+(computeDistance, extractYaw, findLookaheadPoint, computeVelocity)
+INTO ControlCore INSTEAD OF ControlNode SO LOGIC TESTABLE
+WITHOUT ROS RUNNING. NOT REQUIRED. COSTMAP DIDN'T BOTHER, YOU
+DON'T HAVE TO EITHER.
+
+=====================================================
+STEP 4 - CMakeLists.txt
+=====================================================
+OPEN robot/control/CMakeLists.txt.
+
+FIND THIS LINE:
+  find_package(rclcpp REQUIRED)      # ROS2 C++ package
+
+ADD BELOW IT:
+  find_package(nav_msgs REQUIRED)
+  find_package(geometry_msgs REQUIRED)
+  find_package(tf2 REQUIRED)
+
+FIND THIS BLOCK:
+  ament_target_dependencies(control_lib
+    rclcpp
+  )
+
+CHANGE TO:
+  ament_target_dependencies(control_lib
+    rclcpp
+    nav_msgs
+    geometry_msgs
+    tf2
+  )
+
+WITHOUT THIS STEP, BUILD CAVE-TOOL (colcon) NO FIND nav_msgs
+OR geometry_msgs HEADERS. BUILD ANGRY, THROW RED ERROR ROCKS.
+
+=====================================================
+STEP 5 - package.xml
+=====================================================
+FIND:
+  <depend>rclcpp</depend>
+
+ADD RIGHT AFTER:
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+
+THIS TELL ROS PACKAGE SYSTEM "I NEED THESE OTHER CAVE-TRIBES
+INSTALLED TO WORK." SAME REASON COSTMAP ADD <depend>std_msgs</depend>.
+
+=====================================================
+QUICK MEANING GLOSSARY (CAVEMAN DICTIONARY)
+=====================================================
+/path            = LIST OF DOTS ROBOT SHOULD WALK THROUGH, IN ORDER
+/odom/filtered   = "WHERE AM I RIGHT NOW" (POSITION + DIRECTION FACING)
+/cmd_vel         = "GO THIS FAST FORWARD, TURN THIS FAST" ORDER TO WHEELS
+lookahead point  = DOT ON PATH LIL BIT AHEAD OF ROBOT, ROBOT CHASE THIS DOT
+lookahead_distance_ = HOW FAR AHEAD TO PICK THAT DOT (BIGGER = SMOOTHER,
+                       SMALLER = MORE PRECISE BUT JERKY)
+yaw              = DIRECTION ROBOT NOSE POINT (ANGLE), FROM QUATERNION MATH
+Twist            = ROS MESSAGE WITH linear (FORWARD SPEED) AND angular
+                    (TURN SPEED) NUMBERS
+Timer            = CAVE-CLOCK THAT TAP FUNCTION ON SHOULDER EVERY FIXED TIME
+
+=====================================================
+BUILD + TEST (SAME CAVE COMMAND AS COSTMAP)
+=====================================================
+cd ~/wato_asd_training
+colcon build --packages-select control
+source install/setup.bash
+ros2 run control control_node
+
+IF ROBOT NOT MOVE, CHECK:
+  - /path AND /odom/filtered ACTUALLY PUBLISHING (ros2 topic echo)
+  - lookahead_distance_ NOT TOO BIG (BIGGER THAN WHOLE PATH = BAD)
+  - findLookaheadPoint() NOT ALWAYS RETURN std::nullopt
+
+GOOD LUCK CAVEMAN. GO MAKE ROBOT CHASE MAMMOTH DOT.
