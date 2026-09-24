@@ -56,6 +56,7 @@ class PlannerNode : public rclcpp::Node {
 
     // whether we have a goal yet
     bool goal_received_ = false;
+    
     // whether we have robot position yet
     bool odom_received_ = false;  
 
