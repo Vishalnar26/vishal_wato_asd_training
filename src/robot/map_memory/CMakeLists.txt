@@ -33,8 +33,7 @@ ament_target_dependencies(map_memory_lib
 
 # Create ROS2 node executable from source files
 add_executable(map_memory_node src/map_memory_node.cpp)
-# Add ROS2 dependencies required by the map memory library
-ament_target_dependencies(map_memory_lib 
+ament_target_dependencies(map_memory_node
   rclcpp
   nav_msgs
 )

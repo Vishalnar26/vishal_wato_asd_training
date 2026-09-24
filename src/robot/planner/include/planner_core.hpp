@@ -3,21 +3,6 @@
 
 #include "rclcpp/rclcpp.hpp"
 
-namespace robot
-{
-
-class PlannerCore {
-  public:
-    explicit PlannerCore(const rclcpp::Logger& logger);
-
-  private:
-    rclcpp::Logger logger_;
-};
-#ifndef PLANNER_CORE_HPP_
-#define PLANNER_CORE_HPP_
-
-#include "rclcpp/rclcpp.hpp"
-
 // used for storing and comparing A* cells
 #include <functional>
 #include <cstddef>
@@ -91,10 +76,6 @@ namespace robot
     private:
       rclcpp::Logger logger_;
   };
-
-}  
-
-#endif  
 
 }  
 

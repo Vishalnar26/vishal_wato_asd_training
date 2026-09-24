@@ -75,7 +75,7 @@ void PlannerNode::odomCallback(
     const nav_msgs::msg::Odometry::SharedPtr msg)
 {
     latest_odom_ = *msg;
-    odom_recieved_ = true;
+    odom_received_ = true;
 }
 
 
@@ -115,7 +115,7 @@ void PlannerNode::timerCallback()
 void PlannerNode::planPath()
 {
     // makes sure we have a map and goal
-    if (current_map_.data.empty() || !goal_received_ || !odom_recieved) {
+    if (current_map_.data.empty() || !goal_received_ || !odom_received_) {
         return;
     }
 
