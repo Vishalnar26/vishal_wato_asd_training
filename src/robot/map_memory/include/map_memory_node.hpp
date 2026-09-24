@@ -26,12 +26,6 @@ class MapMemoryNode : public rclcpp::Node {
     // Publishes the accumulated global map
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr map_pub_;
 
-    // Publish the accumulated global map on the /map topic
-    map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
-        "/map",
-        10
-    );
-    
     // Stores the most recently received costmap
     nav_msgs::msg::OccupancyGrid latest_costmap_;
     // Stores the most recently received odometry data

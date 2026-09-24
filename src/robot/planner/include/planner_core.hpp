@@ -70,6 +70,9 @@ class PlannerCore {
         const geometry_msgs::msg::Point& goal
     );
 
+<<<<<<< HEAD
+#endif  
+=======
   private:
     rclcpp::Logger logger_;
 };
@@ -77,3 +80,4 @@ class PlannerCore {
 }
 
 #endif
+>>>>>>> origin/main
