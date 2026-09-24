@@ -1,76 +1,90 @@
+
 #include "planner_node.hpp"
 
 #include <chrono>
 #include <cmath>
+#include <functional>
+#include <memory>
 
-// sets up planner node
 PlannerNode::PlannerNode()
     : Node("planner"),
-      planner_(robot::PlannerCore(this->get_logger()))
+      planner_(this->get_logger())
 {
-    // global map
-    map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-        "/map",
-        10,
-        std::bind(&PlannerNode::mapCallback, this, std::placeholders::_1)
-    );
+    // Receive the accumulated global map
+    map_sub_ =
+        this->create_subscription<nav_msgs::msg::OccupancyGrid>(
+            "/map",
+            10,
+            std::bind(
+                &PlannerNode::mapCallback,
+                this,
+                std::placeholders::_1
+            )
+        );
 
-    // goal point
-    goal_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
-        "/goal_point",
-        10,
-        std::bind(&PlannerNode::goalCallback, this, std::placeholders::_1)
-    );
+    // Receive the destination selected in Foxglove
+    goal_sub_ =
+        this->create_subscription<geometry_msgs::msg::PointStamped>(
+            "/goal_point",
+            10,
+            std::bind(
+                &PlannerNode::goalCallback,
+                this,
+                std::placeholders::_1
+            )
+        );
 
-    // robot position
-    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/odom/filtered",
-        10,
-        std::bind(&PlannerNode::odomCallback, this, std::placeholders::_1)
-    );
+    // Track the robot's current position
+    odom_sub_ =
+        this->create_subscription<nav_msgs::msg::Odometry>(
+            "/odom/filtered",
+            10,
+            std::bind(
+                &PlannerNode::odomCallback,
+                this,
+                std::placeholders::_1
+            )
+        );
 
-    // publishes planned path
-    path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
-        "/path",
-        10
-    );
+    // Send the planned route to the Control node
+    path_pub_ =
+        this->create_publisher<nav_msgs::msg::Path>(
+            "/path",
+            10
+        );
 
-    // checks planner every half second
+    // Recheck the route once per second
     timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(500),
+        std::chrono::seconds(1),
         std::bind(&PlannerNode::timerCallback, this)
     );
+
+    RCLCPP_INFO(this->get_logger(), "Planner node started");
 }
 
-
-// saves newest map
 void PlannerNode::mapCallback(
     const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
-    current_map_ = *msg;
-
-    // replan if map changes while going to goal
-    if (state_ == State::WAITING_FOR_ROBOT_TO_REACH_GOAL) {
-        planPath();
-    }
+    latest_map_ = *msg;
+    map_received_ = true;
 }
 
-
-// saves new goal
 void PlannerNode::goalCallback(
     const geometry_msgs::msg::PointStamped::SharedPtr msg)
 {
     goal_ = *msg;
     goal_received_ = true;
 
-    // switch state since we now have a goal
-    state_ = State::WAITING_FOR_ROBOT_TO_REACH_GOAL;
+    RCLCPP_INFO(
+        this->get_logger(),
+        "Received goal: (%.2f, %.2f)",
+        goal_.point.x,
+        goal_.point.y
+    );
 
     planPath();
 }
 
-
-// saves newest robot position
 void PlannerNode::odomCallback(
     const nav_msgs::msg::Odometry::SharedPtr msg)
 {
@@ -78,71 +92,95 @@ void PlannerNode::odomCallback(
     odom_received_ = true;
 }
 
-
-// checks if robot is close enough to goal
-bool PlannerNode::goalReached()
+bool PlannerNode::goalReached() const
 {
-    // distance between robot and goal
-    double dx = goal_.point.x - latest_odom_.pose.pose.position.x;
-    double dy = goal_.point.y - latest_odom_.pose.pose.position.y;
-
-    double distance = std::sqrt(
-        dx * dx + dy * dy
-    );
-
-    return distance < 0.5;
-}
-
-
-// checks robot progress
-void PlannerNode::timerCallback()
-{
-    if (state_ == State::WAITING_FOR_ROBOT_TO_REACH_GOAL) {
-
-        // go back to waiting once goal is reached
-        if (goalReached()) {
-            RCLCPP_INFO(this->get_logger(), "Goal reached!");
-
-            state_ = State::WAITING_FOR_GOAL;
-            goal_received_ = false;
-        }
+    if (!goal_received_ || !odom_received_) {
+        return false;
     }
+
+    double dx =
+        latest_odom_.pose.pose.position.x - goal_.point.x;
+
+    double dy =
+        latest_odom_.pose.pose.position.y - goal_.point.y;
+
+    return std::sqrt(dx * dx + dy * dy) < 0.4;
 }
 
-
-// calculates path
-// calculates and publishes the path
 void PlannerNode::planPath()
 {
-    // makes sure we have a map and goal
-    if (current_map_.data.empty() || !goal_received_ || !odom_received_) {
+    if (!map_received_ || !odom_received_ || !goal_received_) {
         return;
     }
 
-    // gets robot's current position
-    geometry_msgs::msg::Point start;
-    start.x = latest_odom_.pose.pose.position.x;
-    start.y = latest_odom_.pose.pose.position.y;
+    if (goalReached()) {
+        return;
+    }
 
-    // gets goal position
-    geometry_msgs::msg::Point goal;
-    goal.x = goal_.point.x;
-    goal.y = goal_.point.y;
+    // All coordinates must use the same reference frame
+    if (latest_map_.header.frame_id !=
+            latest_odom_.header.frame_id ||
+        goal_.header.frame_id !=
+            latest_map_.header.frame_id) {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "Map, odometry and goal have different frames"
+        );
+        return;
+    }
 
-    // runs A*
-    nav_msgs::msg::Path path =
-        planner_.findPath(current_map_, start, goal);
+    auto path = planner_.findPath(
+        latest_map_,
+        latest_odom_.pose.pose.position,
+        goal_.point
+    );
 
-    // publishes the path
+    if (path.poses.empty()) {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "No path available"
+        );
+        return;
+    }
+
+    path.header.stamp = this->now();
+
+    for (auto& pose : path.poses) {
+        pose.header.stamp = path.header.stamp;
+    }
+
     path_pub_->publish(path);
 }
 
+void PlannerNode::timerCallback()
+{
+    if (!goal_received_) {
+        return;
+    }
 
-// starts ROS2 node
-int main(int argc, char ** argv)
+    if (goalReached()) {
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Robot reached its goal"
+        );
+
+        goal_received_ = false;
+        return;
+    }
+
+    // Update the path using the latest map and robot position
+    planPath();
+}
+
+int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<PlannerNode>());
+
+    rclcpp::spin(
+        std::make_shared<PlannerNode>()
+    );
+
     rclcpp::shutdown();
+
     return 0;
 }

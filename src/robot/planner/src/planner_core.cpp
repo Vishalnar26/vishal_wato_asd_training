@@ -1,225 +1,225 @@
+
 #include "planner_core.hpp"
 
-// stuff used for A*
-#include <queue>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-#include <cmath>
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <queue>
+#include <vector>
 
-// used for each point in the final path
 #include "geometry_msgs/msg/pose_stamped.hpp"
 
-namespace robot
-{
+namespace robot {
 
 PlannerCore::PlannerCore(const rclcpp::Logger& logger)
     : logger_(logger) {}
 
-// finds a path from the robot to the goal
+// A* finds a path through free cells while avoiding obstacles
 nav_msgs::msg::Path PlannerCore::findPath(
     const nav_msgs::msg::OccupancyGrid& map,
     const geometry_msgs::msg::Point& start,
     const geometry_msgs::msg::Point& goal)
 {
     nav_msgs::msg::Path path;
+    path.header = map.header;
 
-    // use the same coordinate frame as the map
-    path.header.frame_id = map.header.frame_id;
+    const int width = static_cast<int>(map.info.width);
+    const int height = static_cast<int>(map.info.height);
+    const double resolution = map.info.resolution;
 
-    // converts robot position to a grid cell
-    int start_x = static_cast<int>(
-        (start.x - map.info.origin.position.x) / map.info.resolution
-    );
+    if (width <= 0 || height <= 0 || resolution <= 0.0 ||
+        map.data.size() != static_cast<size_t>(width * height)) {
+        RCLCPP_WARN(logger_, "Map is empty or invalid");
+        return path;
+    }
 
-    int start_y = static_cast<int>(
-        (start.y - map.info.origin.position.y) / map.info.resolution
-    );
+    const double origin_x = map.info.origin.position.x;
+    const double origin_y = map.info.origin.position.y;
 
-    // converts goal position to a grid cell
-    int goal_x = static_cast<int>(
-        (goal.x - map.info.origin.position.x) / map.info.resolution
-    );
+    // Convert world coordinates into grid coordinates
+    auto toCell = [&](double x, double y) {
+        int col = static_cast<int>(
+            std::floor((x - origin_x) / resolution));
+        int row = static_cast<int>(
+            std::floor((y - origin_y) / resolution));
 
-    int goal_y = static_cast<int>(
-        (goal.y - map.info.origin.position.y) / map.info.resolution
-    );
+        return std::array<int, 2>{col, row};
+    };
 
-    // start and goal cells for A*
-    CellIndex start_cell(start_x, start_y);
-    CellIndex goal_cell(goal_x, goal_y);
+    auto start_cell = toCell(start.x, start.y);
+    auto goal_cell = toCell(goal.x, goal.y);
 
-    // checks if start and goal are inside the map
-    if (start_x < 0 ||
-        start_x >= static_cast<int>(map.info.width) ||
-        start_y < 0 ||
-        start_y >= static_cast<int>(map.info.height) ||
-        goal_x < 0 ||
-        goal_x >= static_cast<int>(map.info.width) ||
-        goal_y < 0 ||
-        goal_y >= static_cast<int>(map.info.height)) {
+    auto insideMap = [&](int col, int row) {
+        return col >= 0 && col < width &&
+               row >= 0 && row < height;
+    };
 
+    if (!insideMap(start_cell[0], start_cell[1]) ||
+        !insideMap(goal_cell[0], goal_cell[1])) {
         RCLCPP_WARN(logger_, "Start or goal is outside the map");
         return path;
     }
 
-    // cells A* still needs to check
+    auto indexOf = [&](int col, int row) {
+        return row * width + col;
+    };
+
+    const int start_index =
+        indexOf(start_cell[0], start_cell[1]);
+
+    const int goal_index =
+        indexOf(goal_cell[0], goal_cell[1]);
+
+    // Unknown cells and cells with high obstacle costs are blocked
+    auto isBlocked = [&](int index) {
+        int cost = map.data[index];
+        return cost < 0 || cost >= 80;
+    };
+
+    if (isBlocked(start_index) || isBlocked(goal_index)) {
+        RCLCPP_WARN(logger_, "Start or goal is blocked or unknown");
+        return path;
+    }
+
+    struct SearchNode {
+        int index;
+        double priority;
+    };
+
+    struct CompareNodes {
+        bool operator()(
+            const SearchNode& a,
+            const SearchNode& b) const
+        {
+            return a.priority > b.priority;
+        }
+    };
+
     std::priority_queue<
-        AStarNode,
-        std::vector<AStarNode>,
-        CompareF
-    > open_list;
+        SearchNode,
+        std::vector<SearchNode>,
+        CompareNodes
+    > open_set;
 
-    // cells A* already checked
-    std::unordered_set<CellIndex, CellIndexHash> closed_list;
+    const int total_cells = width * height;
 
-    // cheapest cost found to each cell
-    std::unordered_map<CellIndex, double, CellIndexHash> g_score;
+    std::vector<double> distance(
+        total_cells,
+        std::numeric_limits<double>::infinity()
+    );
 
-    // remembers where each cell came from
-    std::unordered_map<CellIndex, CellIndex, CellIndexHash> came_from;
+    std::vector<int> previous(total_cells, -1);
+    std::vector<bool> visited(total_cells, false);
 
-    // start cell has no travel cost yet
-    g_score[start_cell] = 0.0;
+    // Manhattan distance estimates how far a cell is from the goal
+    auto heuristic = [&](int index) {
+        int col = index % width;
+        int row = index / width;
 
-    // estimates distance from start to goal
-    double start_h =
-        std::abs(goal_x - start_x) +
-        std::abs(goal_y - start_y);
+        return static_cast<double>(
+            std::abs(col - goal_cell[0]) +
+            std::abs(row - goal_cell[1])
+        );
+    };
 
-    // adds the starting cell to the open list
-    open_list.push(AStarNode(start_cell, start_h));
+    distance[start_index] = 0.0;
+    open_set.push({start_index, heuristic(start_index)});
 
-    // keeps searching while there are cells left to check
-    while (!open_list.empty()) {
+    const std::array<std::array<int, 2>, 4> directions = {{
+        {{1, 0}},
+        {{-1, 0}},
+        {{0, 1}},
+        {{0, -1}}
+    }};
 
-        // gets the cell with the lowest f score
-        AStarNode current = open_list.top();
-        open_list.pop();
+    bool found = false;
 
-        // skips it if we already checked this cell
-        if (closed_list.count(current.index) > 0) {
+    while (!open_set.empty()) {
+        int current = open_set.top().index;
+        open_set.pop();
+
+        if (visited[current]) {
             continue;
         }
 
-        // marks this cell as checked
-        closed_list.insert(current.index);
+        visited[current] = true;
 
-        // stops searching once A* reaches the goal
-        if (current.index == goal_cell) {
+        if (current == goal_index) {
+            found = true;
             break;
         }
 
-        // directions for the 4 neighboring cells
-        int directions[4][2] = {
-            {1, 0},
-            {-1, 0},
-            {0, 1},
-            {0, -1}
-        };
+        int col = current % width;
+        int row = current / width;
 
-        // checks each neighboring cell
+        // Check the four neighboring cells
         for (const auto& direction : directions) {
+            int next_col = col + direction[0];
+            int next_row = row + direction[1];
 
-            CellIndex neighbor(
-                current.index.x + direction[0],
-                current.index.y + direction[1]
-            );
-
-            // skips neighbors outside the map
-            if (neighbor.x < 0 ||
-                neighbor.x >= static_cast<int>(map.info.width) ||
-                neighbor.y < 0 ||
-                neighbor.y >= static_cast<int>(map.info.height)) {
+            if (!insideMap(next_col, next_row)) {
                 continue;
             }
 
-            // gets the neighbor's position in the map data
-            int neighbor_index =
-                neighbor.y * map.info.width + neighbor.x;
+            int next = indexOf(next_col, next_row);
 
-            // skips cells that are obstacles
-            if (map.data[neighbor_index] >= 100) {
+            if (visited[next] || isBlocked(next)) {
                 continue;
             }
 
-            // skips cells already checked
-            if (closed_list.count(neighbor) > 0) {
-                continue;
-            }
+            // Prefer cells with lower obstacle costs
+            double movement_cost =
+                1.0 + static_cast<double>(map.data[next]) / 100.0;
 
-            // cost to reach this neighbor
-            double tentative_g =
-                g_score[current.index] + 1.0;
+            double new_distance =
+                distance[current] + movement_cost;
 
-            // checks if this is a better way to reach the neighbor
-            if (g_score.find(neighbor) == g_score.end() ||
-                tentative_g < g_score[neighbor]) {
+            if (new_distance < distance[next]) {
+                distance[next] = new_distance;
+                previous[next] = current;
 
-                // saves the new cheaper cost
-                g_score[neighbor] = tentative_g;
-
-                // remembers how we got to this cell
-                came_from[neighbor] = current.index;
-
-                // estimates distance from neighbor to goal
-                double h =
-                    std::abs(goal_x - neighbor.x) +
-                    std::abs(goal_y - neighbor.y);
-
-                // total A* score
-                double f = tentative_g + h;
-
-                // adds neighbor as a cell to check
-                open_list.push(AStarNode(neighbor, f));
+                open_set.push({
+                    next,
+                    new_distance + heuristic(next)
+                });
             }
         }
     }
 
-    // returns empty path if A* could not reach the goal
-    if (closed_list.count(goal_cell) == 0) {
+    if (!found) {
         RCLCPP_WARN(logger_, "Could not find a path to the goal");
         return path;
     }
 
-    // works backwards from goal to start
-    std::vector<CellIndex> path_cells;
+    // Follow the recorded cells backward from goal to start
+    std::vector<int> cell_path;
 
-    CellIndex current_cell = goal_cell;
-
-    while (current_cell != start_cell) {
-        path_cells.push_back(current_cell);
-        current_cell = came_from[current_cell];
+    for (int current = goal_index;
+         current != -1;
+         current = previous[current]) {
+        cell_path.push_back(current);
     }
 
-    // adds the starting cell too
-    path_cells.push_back(start_cell);
+    std::reverse(cell_path.begin(), cell_path.end());
 
-    // changes it from goal-to-start into start-to-goal
-    std::reverse(path_cells.begin(), path_cells.end());
-
-    // converts grid cells back into real world positions
-    for (const CellIndex& cell : path_cells) {
+    // Convert grid cells back into world coordinates
+    for (int index : cell_path) {
+        int col = index % width;
+        int row = index / width;
 
         geometry_msgs::msg::PoseStamped pose;
+        pose.header = path.header;
 
-        // uses the same coordinate frame as the map
-        pose.header.frame_id = map.header.frame_id;
-
-        // converts grid position back to meters
         pose.pose.position.x =
-            map.info.origin.position.x +
-            (cell.x + 0.5) * map.info.resolution;
+            origin_x + (col + 0.5) * resolution;
 
         pose.pose.position.y =
-            map.info.origin.position.y +
-            (cell.y + 0.5) * map.info.resolution;
+            origin_y + (row + 0.5) * resolution;
 
-        // gives the pose a valid rotation
+        pose.pose.position.z = 0.0;
         pose.pose.orientation.w = 1.0;
 
-        // adds this point to the final path
         path.poses.push_back(pose);
     }
 
